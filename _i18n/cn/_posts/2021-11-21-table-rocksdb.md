@@ -1,5 +1,5 @@
 ---
-title: "开脑洞地为 rocksdb 引入 orc 替换 sst"
+title: "开脑洞地为 rocksdb 引入 orc"
 hidden: false
 tags:
  -
