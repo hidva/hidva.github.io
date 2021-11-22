@@ -22,7 +22,11 @@ tags:
 
 ## 如何解决
 
-而我的脑洞也受到了 OB 的启发, 通过给 rocksdb 加入行的语义, 此时 rocksdb K 是 primary key, V 是列按照指定规则编码后的值, rocksdb 是知道 V 有哪些列的, 并且其也能解析出 V 中列. rocksdb DB 配置可以指定是使用 SST 还是 ORC 作为后端存储, 还是同时使用 ORC + SST. 若指定了使用 ORC, 则在 Flush Memtable 时便会扫描 memtable 所有行, 然后转储为 orc. 此时 compaction 的输入/输出也都是 orc 格式. 若同时使用了 ORC + SST, 则 flush memtable 时会基于一份 memtable 生成 SST/ORC 存储, 这时通过一个 VersionEdit 来将新生成的 SST/ORC 文件原子性加入到 Version 中. 也即同时启用 ORC+SST 时, ORC, SST 中的数据总是完全一致的. 此时 compaction 可以选择使用 SST 或者 ORC, 之后生成 SST + ORC. 在同时启用 SST + ORC 的情况下, 我们可以根据查询特征自适应选择使用 SST 还是 ORC, 反正这俩总是一致的. 对于 ORC, 除用户列之外, 还有有一个元数据列, 类似于 ObRowHeader, 这个元数据列编码了 timestamp, value_type 信息. 当然为了 ORC 更好的压缩编码, 或许将 timestamp, value_type 分成两个列存储最合适.
+而我的脑洞也受到了 OB 的启发, 通过给 rocksdb 加入行的语义, 此时 rocksdb K 是 primary key, V 是列按照指定规则编码后的值, rocksdb 是知道 V 有哪些列的, 并且其也能解析出 V 中列. rocksdb DB 配置可以指定是使用 SST 还是 ORC 作为后端存储, 还是同时使用 ORC + SST. 若指定了使用 ORC, 则在 Flush Memtable 时便会扫描 memtable 所有行, 然后转储为 orc. 此时 compaction 的输入/输出也都是 orc 格式. 若同时使用了 ORC + SST, 则 flush memtable 时会基于一份 memtable 生成 SST/ORC 存储, 这时通过一个 VersionEdit 来将新生成的 SST/ORC 文件原子性加入到 Version 中. 也即同时启用 ORC+SST 时, ORC, SST 中的数据总是完全一致的. 此时 compaction 可以选择使用 SST 或者 ORC, 之后生成 SST + ORC. 在同时启用 SST + ORC 的情况下, 我们可以根据查询特征自适应选择使用 SST 还是 ORC, 反正这俩总是一致的. 对于 ORC, 除用户列之外, 还有有一个元数据列, 类似于 ObRowHeader, 这个元数据列编码了 timestamp, value_type 信息. 当然为了 ORC 更好的压缩编码, 或许将 timestamp, value_type 分成两个列存储最合适. 
+
+关于 ORC 如何表示 delete, 和 SST/OB 一样, ORC 会通过 value type 元数据列来表示, 若 value type 等于kValueTypeDeletion, 此时行中仅有 primary key 列有值, 其他列 null, 此时这行语义表明是对 primary key 的删除. ORC 排序策略仍然使用 rocksdb internal key 排序策略, 即对于同一个主键, kValueTypeDeletion 行会排在其他行之前.
+
+另外 SST, ORC 不要求是对齐的, 即不需要一个 SST 对应着一个 ORC. 在同时开启 SST/ORC 时, 只要 FlushMemtable 时同时生成 sst/orc 并通过一条 VersionEdit 原子更新到 Version 之后. SST, ORC 文件便可以随意按照各自的 compaction 策略进行 compaction 了. 毕竟 compaction 只是改变了数据的组织存放方式, 并不会改变数据的内容.
 
 关于 schema 的管理, 准备采用 PG pg_attribute 那套 schema 管理, 即表 schema 包含如下内容, 我们这里有个限定条件, 当列加入到表之后, 其便只能被 drop, 即只有 Col::attisdropped 字段能改变, 其他字段无法改变.:
 
