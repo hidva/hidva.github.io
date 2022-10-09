@@ -225,3 +225,57 @@ def find(left, right, sizechar, arena_ind=None):
   ret = []
   traverse_extent(lambda e: find_traverse_cb(e, left, right, sizechar, arena_ind, ret))
   return ret
+
+
+# -*- coding: UTF-8 -*-
+import re, bisect, sys
+
+# 输入: maintenance info sections
+# 输出: 若干互不相交的地址区间
+class Merger(object):
+  def __init__(self):
+    # self.data [(left, right)], 每一个元素表明 [left, right) 区间, 元素之间不相交, 并且按照 left 从小到大排序.
+    self.data_l = []
+    self.data_r = []
+
+  # 若 [left, right) 表明的区间与 self.data 某一区间相交, 则合入该区间. 否则新插入到 self.data 中.
+  def insert(self, left, right):
+    idx = bisect.bisect_left(self.data_l, left)
+    merge_l = idx > 0 and left <= self.data_r[idx - 1]
+    merge_r = idx < len(self.data_l) and right >= self.data_l[idx]
+    if not merge_l and not merge_r:
+      self.data_l.insert(idx, left)
+      self.data_r.insert(idx, right)
+      return
+    if merge_l and not merge_r:
+      self.data_r[idx - 1] = max(right, self.data_r[idx - 1])
+      return
+    if not merge_l and merge_r:
+      self.data_l[idx] = left
+      self.data_r[idx] = max(right, self.data_r[idx])
+      return
+    # merge_l and merge_r
+    self.data_r[idx - 1] = max(right, self.data_r[idx])
+    self.data_l.pop(idx)
+    self.data_r.pop(idx)
+    return
+
+# fileobj, 该文件中存放着 maintenance info sections 的输出.
+# ret [(left, right)], 等同于 Merger::data.
+def parse_info_sections(fileobj):
+  PATTERN = re.compile(r'(0x[0-9a-f]+)->(0x[0-9a-f]+)\s+at\s+(0x[0-9a-f]+)')
+  merger = Merger()
+  for line in fileobj:
+    line = line.strip()
+    if not line:
+      continue
+    matchobj = PATTERN.search(line)
+    if not matchobj:
+      continue
+    s_addr = int(matchobj.group(1), 0)
+    e_addr = int(matchobj.group(2), 0)
+    if s_addr >= e_addr:
+      continue
+    merger.insert(s_addr, e_addr)
+  return [(merger.data_l[i], merger.data_r[i]) for i in xrange(0, len(merger.data_l))]
+
