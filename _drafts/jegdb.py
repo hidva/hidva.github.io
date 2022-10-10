@@ -13,6 +13,8 @@
 #   gdb> [140608853448544]
 #
 import gdb
+import re, bisect, sys
+
 UINT64_MAX = (2 ** 64) - 1
 LG_VADDR = 48
 LG_SIZEOF_PTR = 3
@@ -176,6 +178,25 @@ def extent_size_get(extent):
 def extent_arena_ind_get(extent):
   return (int(extent['e_bits']) & EXTENT_BITS_ARENA_MASK) >> EXTENT_BITS_ARENA_SHIFT
 
+def extent_slab_get(extent):
+  e_bits = int(extent['e_bits'])
+  return ((e_bits & EXTENT_BITS_SLAB_MASK) >> EXTENT_BITS_SLAB_SHIFT) != 0
+
+def extent_szind_get(extent):
+  e_bits = int(extent['e_bits'])
+  return (e_bits & EXTENT_BITS_SZIND_MASK) >> EXTENT_BITS_SZIND_SHIFT
+
+def extent_addr_get(extent):
+  return int(extent['e_addr'])
+
+extent_state_active   = 0
+extent_state_dirty    = 1
+extent_state_muzzy    = 2
+extent_state_retained = 3
+def extent_state_get(extent):
+  e_bits = int(extent['e_bits'])
+  return (e_bits & EXTENT_BITS_STATE_MASK) >> EXTENT_BITS_STATE_SHIFT
+
 def find_traverse_cb(extent, left, right, bitwidth, arena_ind, retlist):
   if arena_ind is not None and extent_arena_ind_get(extent) != arena_ind:
     return
@@ -226,9 +247,49 @@ def find(left, right, sizechar, arena_ind=None):
   traverse_extent(lambda e: find_traverse_cb(e, left, right, sizechar, arena_ind, ret))
   return ret
 
+LG_SIZEOF_BITMAP = 3
+LG_BITMAP_GROUP_NBITS = LG_SIZEOF_BITMAP + 3
+BITMAP_GROUP_NBITS = 1 << LG_BITMAP_GROUP_NBITS
+BITMAP_GROUP_NBITS_MASK = BITMAP_GROUP_NBITS-1
+# bitmap_ptr, int, bitmap_t* 指针类型.
+# ret True/False
+def bitmap_get(bitmap_ptr, bit):
+  goff = bit >> LG_BITMAP_GROUP_NBITS
+  g = int(array_at(bitmap_ptr, goff, gdb.lookup_type('unsigned long')))
+  return (g & c_u64_left_shift(1, (bit & BITMAP_GROUP_NBITS_MASK))) == 0
 
-# -*- coding: UTF-8 -*-
-import re, bisect, sys
+
+sz_index2size_tab = gdb.lookup_global_symbol('je_sz_index2size_tab').value()
+# extent, gdb.Value, extent_t 类型.
+# ptr, int,
+# ret: (regind: int, regsize: int),
+def arena_slab_regind(extent, ptr):
+  assert extent_slab_get(extent)
+  assert ptr >= extent_addr_get(extent)
+  diff = ptr - extent_addr_get(extent)
+  szind = extent_szind_get(extent)
+  regsize = int(sz_index2size_tab[szind])
+  return (diff // regsize, regsize)
+
+# 若 ptr 指向内存块是 jemalloc 分配的, 那么返回内存块的首地址, 内存块的大小, 以及内存块是否处于 free 状态 is_free.
+# ret, (small_size_class?, chunk_ptr, chunk_size, is_free)
+# 若 is_free = false, 则意味着内存块尚未被 free, 或者被 free 了但位于 tcache 中, 对 jemalloc arena 系统尚不可见.
+# 对于 large size class 由于 cache_oblivious 的存在, chunk_size 可能大于实际 size.
+# ptr, int,
+def ptr_info(ptr):
+  ex = rtree_leaf_elm_bits_extent_get(int(rtree_lookup(ptr)))
+  small_size_class = extent_slab_get(ex)
+  chunk_ptr = extent_addr_get(ex)
+  if small_size_class:
+    regind, regsize = arena_slab_regind(ex, ptr)
+    chunk_ptr = chunk_ptr + regind * regsize
+    chunk_size = regsize
+    is_free = not bitmap_get(int(ex['e_slab_data']['bitmap'].address), regind)
+  else:
+    chunk_size = extent_size_get(ex)
+    is_free = extent_state_get(ex) != extent_state_active
+  return (small_size_class, chunk_ptr, chunk_size, is_free)
+
 
 # 输入: maintenance info sections
 # 输出: 若干互不相交的地址区间
@@ -278,4 +339,3 @@ def parse_info_sections(fileobj):
       continue
     merger.insert(s_addr, e_addr)
   return [(merger.data_l[i], merger.data_r[i]) for i in xrange(0, len(merger.data_l))]
-
