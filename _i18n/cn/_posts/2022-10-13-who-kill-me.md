@@ -123,8 +123,28 @@ $od -A d -t xI ~/tmp/hos-lw-core/siginfo.desc.txt
 #define SI_FROMUSER(siptr)	((siptr)->si_code <= 0)
 ```
 
-考虑到 linux pid namespace 的存在, 单单这里记录的 pid=0x19, 由于缺少对应的 pid namespace, 所以并不能确认是哪个进程. 根据 kernel code 可知这里 pid=0x19 是调用 tkill 的进程当前的 pid namespace X. 设 crash 进程所处 namespace 为 Y, 根据 kernel kill 以及 pid 可见性规则, 这里 X 要么是 Y, 要么是 Y 的祖先. 不想写了, 现在一堆的疑问:
+考虑到 linux pid namespace 的存在, 单单这里记录的 pid=0x19, 由于缺少对应的 pid namespace, 所以并不能确认是哪个进程. 根据 kernel code 可知这里 pid=0x19 是调用 tkill 的进程当前的 pid namespace X. 设 crash 进程所处 namespace 为 Y, 根据 kernel kill 以及 pid 可见性规则, 这里 X 要么是 Y, 要么是 Y 的祖先. 如果 X = Y, 那么 pid=25 就是 crash 进程本身, crash 进程确实有个线程 pid = 25. 如果 X 是 Y 的祖先, 那么就对应着 cpuhp 这个内核线程. 不想写了, 现在一堆的疑问:
 
 - 具体是谁发送了 SIGSEGV 信号???
 
 - 无论是谁发送了 SIGSEGV 信号, rip=0x7f54b0335d11, r14=0 这种组合都不应该出现啊!
+
+
+# 后记
+
+在发到群里面分享的时候, 在小伙伴们的不断脑暴启发下, 我进一步确认了下我们 SIGSEGV handler 实现(这是一块很久很久很久无人寻迹过的代码了), 然后发现这里面居然不是我以为的 abort,,, 而是 raise(sig):
+
+```c
+/* Pass on the signal (so that a core file is produced).  */		
+struct sigaction sa;		
+sa.sa_handler = SIG_DFL;		
+sigemptyset(&sa.sa_mask);		
+sa.sa_flags = 0;		
+sigaction(sig, &sa, NULL);		
+raise(sig);
+```
+
+这就解释了为啥 core note segment SIGINFO 说 SIGSEGV 是用户态发送的. 它确实是用户态发起的, 并且确实是 crash 进程自己发起的. 至于另外一个 (rip, r14) 诡异组合问题, 等我把上面那个 SIGSEGV handler 移除之后再观察, 我也确实修复过一个 write-after-free/double free 问题, 估计是这个问题的副作用.
+
+(大家真是太棒了! 这个问题两个月前出现, 我那时进行了一次冲锋, 以失败告终; 今天兴致又起看了下, 居然有了点结论!
+
