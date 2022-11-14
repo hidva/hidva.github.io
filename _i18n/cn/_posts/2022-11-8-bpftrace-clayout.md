@@ -50,6 +50,7 @@ int main(int argc, char **argv) {
 便可以通过如下 bpftrace 脚本:
 
 ```
+// t.bt
 #include "struct.h"  // 其中存放着 S 的定义.
 
 u:/apsara/zhanyi.ww/tmp/bphtrace/a.out:_ZN1S1fEii {
@@ -100,13 +101,125 @@ struct S {
 
 而且在双 11 大促值班过程那种紧张需要快速定位问题的背景下, 也不会给太多时间让你手写一下类的详细布局. 所以我们需要一个工具能将 C++ 类布局翻译成具有相同内存布局的 C 结构.
 
+## bpftrace 0.16
+
+实际上, 在[这个PR](https://github.com/iovisor/bpftrace/pull/2034)的加持下, 最新版本的 bpftrace, 实测 v0.16.0, 已经支持解析 binary 中的调试信息来计算字段偏移. 继续以如上例子举例, 在 bpftrace 0.16 下, bpftrace 脚本可以直接写为:
+
+```bpftrace
+// 这里并不需要任何关于 S 的声明. bpftrace 会解析 a.out 中的调试信息, 来计算 `S::x` 的偏移.
+u:/apsara/zhanyi.ww/tmp/bphtrace/a.out:_ZN1S1fEii {
+  printf("output from bpftrace: ret=%p this.x=%d y=%d z=%d\n", (int32*)arg0, ((struct S*)arg1)->x, arg2, arg3)
+}
+```
+
+他甚至来支持模板形式, 比如:
+
+```bpftrace
+// 这里 S 是个模板类. bpftrace 会解析 trace2 中的调试信息来计算 `S<long>::x` 的偏移
+u:/tmp/x/trace2:_ZN1SIlE1fEii {
+  printf("output from bpftrace: ret=%p this.x=%d y=%d z=%d\n", (int32*)arg0, ((struct S<long>*)arg1)->x, arg2, arg3)
+}
+```
+
+还是挺酷的.
+
 ## clayout
 
-clayout, 会通过解析 shared library/binary .debug_info/.debug_type section 中记录的 dwarf 信息来将 C++ 类翻译成具有相同内存布局的 C 结构. ~~直接吃编译器嚼好的结果更香更准确.~~ 还是以如上例子:
+但 bpftrace 不支持跨 so 类型引用的情况:
+
+```c++
+// x.h
+struct X {
+  virtual ~X();
+
+  int x1;
+};
+
+struct S : public X {
+  S();
+
+  S(const S &other);
+
+  int x;
+};
+
+// X.cc
+#include <stdio.h>
+#include "x.h"
+
+X::~X() {}
+
+S::S(): x(0) {}
+
+S::S(const S &other) : x(other.x) {}
+
+// trace.cc
+#include <stdio.h>
+#include <unistd.h>
+
+#include "x.h"
+
+
+S a_long_function(S& input, int y, int z) {
+  printf("output from a.out: this.x=%d y=%d z=%d\n", input.x, y, z);
+  input.x += (y + z);
+  return input;
+}
+
+int main(int argc, char **argv) {
+  S s;
+  int i = 0;
+  while (1) {
+    a_long_function(s, i, i);
+    ++i;
+    sleep(1);
+    // break;
+  }
+  return 0;
+}
+```
+
+```bash
+$ clang++ -O0 -g X.cc -fPIC -shared -o libHidvaTest.so
+$ clang++ -O0 -g trace.cc -L. -lHidvaTest -o trace
+```
+
+此时由于 clang 默认开启的 `-fstandalone-debug` 优化:
+
+> -fstandalone-debug Clang supports a number of optimizations to reduce the size of debug information in the binary. They work based on the assumption that the debug type information can be spread out over multiple compilation units. Specifically, the optimizations are:
+>
+> will only emit type info for a dynamic C++ class in the module that contains the vtable for the class.
+
+考虑到 S/X 类的 vtable 定义在 libHidvaTest.so 中, trace binary 中并不会包含 S/X 的详细信息, 只是会包含一个 DW_AT_declaration:
 
 ```
-# clayout 会生成 struct.h, struct.c
-$ clayout -i ${binary path} -o struct S
+readelf --debug-dump=info trace
+ <1><c4>: Abbrev Number: 6 (DW_TAG_structure_type)
+    <c5>   DW_AT_name        : (indirect string, offset: 0x3f): S
+    <c9>   DW_AT_declaration : 1
+```
+
+这就导致了 bpftrace 也无法从 trace binary 的调试信息中计算出字段的偏移:
+
+```bpftrace
+u:/tmp/x/3/trace:_Z15a_long_functionR1Sii {
+  printf("output from bpftrace: ret=%p this.x=%d y=%d z=%d\n", (int32*)arg0, ((struct S*)arg1)->x, arg2, arg3)
+}
+```
+
+```
+$ bpftrace t.bt -c ./trace
+t.bt:2:78-99: ERROR: Struct/union of type 'struct S' does not contain a field named 'x'
+  printf("output from bpftrace: ret=%p this.x=%d y=%d z=%d\n", (int32*)arg0, ((struct S*)arg1)->x, arg2, arg3)
+```
+
+
+[clayout](https://hidva.com/g?u=https://github.com/hidva/clayout), 会通过解析一个或多个 shared library/binary .debug_info/.debug_type section 中记录的 dwarf 信息来将 C++/Rust 类翻译成具有相同内存布局的 C 结构. ~~直接吃编译器嚼好的结果更香更准确.~~ 还是以如上例子:
+
+```
+# clayout 会读取 trace, libHidvaTest.so 中的 dwarf debuginfo.
+# 并生成 struct.h, struct.c
+$ clayout -i trace -i libHidvaTest.so -o struct S
 
 # struct.h 中包含 S 的详细布局.
 # struct.c 中只是包含一些 assert, 用于校验生成的 S 结构对不对. 建议在使用 struct.h 之前编译执行下断言,
