@@ -339,3 +339,91 @@ def parse_info_sections(fileobj):
       continue
     merger.insert(s_addr, e_addr)
   return [(merger.data_l[i], merger.data_r[i]) for i in xrange(0, len(merger.data_l))]
+
+TCACHE_FIELD = 'cant_access_tsd_items_directly_use_a_getter_or_setter_tcache'
+
+# head, int 类型, 实际类型 *tsd_t
+# cb, 调用形式: Fn(val) -> bool
+#   val, gdb.Value, tsd_t 类型.
+#   RET, true, 继续遍历.
+def do_traverse_tsd_list(head, cb):
+  if head == 0:
+    return
+  TSD_T_TYPE = gdb.lookup_type('tsd_t')
+  next = head
+  nextobj = gdb.Value(next).cast(TSD_T_TYPE.pointer()).dereference()
+  while True:
+    if not cb(nextobj):
+      break
+    next = nextobj[TCACHE_FIELD]['tsd_link']['qre_next']
+    if int(next) == head:
+      break
+    nextobj = next.dereference()
+  return
+
+def traverse_tsd_list(cb):
+  h = int(gdb.parse_and_eval('tsd_nominal_tsds')['qlh_first'])
+  do_traverse_tsd_list(h, cb)
+  return
+
+def ptr_eq(ptr1, ptr2, is_small):
+  if is_small:
+    return ptr1 == ptr2
+  # cache_oblivious
+  return PAGE_ADDR2BASE(ptr1) == PAGE_ADDR2BASE(ptr2)
+
+# val, gdb.Value 类型, cache_bin_s 类型.
+# ptr, int
+# RET, [idx], -ncached <= idx <= -1
+def cache_bin_find(cachebin, ptr, is_small):
+  ret = []
+  VOID_TYPE = gdb.lookup_type('void')
+  avail = int(cachebin['avail'])
+  ncached = int(cachebin['ncached'])
+  for idx in xrange(-ncached, 0):
+    val = int(array_at(avail, idx, VOID_TYPE.pointer()))
+    if ptr_eq(val, ptr, is_small):
+      ret.append(idx)
+  return ret
+
+SC_LG_NGROUP = 2
+LG_QUANTUM = 4
+SC_NGROUP = 1 << SC_LG_NGROUP
+SC_PTR_BITS = ((1 << LG_SIZEOF_PTR) * 8)
+SC_NTINY = (LG_QUANTUM - SC_LG_TINY_MIN)
+SC_NPSEUDO = SC_NGROUP
+SC_LG_FIRST_REGULAR_BASE = (LG_QUANTUM + SC_LG_NGROUP)
+SC_LG_BASE_MAX = (SC_PTR_BITS - 2)
+SC_NREGULAR = (SC_NGROUP * (SC_LG_BASE_MAX - SC_LG_FIRST_REGULAR_BASE + 1) - 1)
+SC_NSIZES = (SC_NTINY + SC_NPSEUDO + SC_NREGULAR)
+SC_NBINS = (SC_NTINY + SC_NPSEUDO + SC_NGROUP * (LG_PAGE + SC_LG_NGROUP - SC_LG_FIRST_REGULAR_BASE) - 1)
+# tsd, gdb.Value, tsd_t 类型.
+# ptr, int 类型.
+# 若在 tsd tcache 中找到了 ptr, 则返回 [(is_small, idx, [cache_idx])].
+#  is_small 为 true 意味着 bins_small, 否则 bins_large.
+#  idx 为 bins_small/bins_large 下标.
+def tcache_find(tsd, ptr):
+  ret = []
+  tcache = tsd[TCACHE_FIELD]
+  CACHE_BIN_T_TYPE = gdb.lookup_type('cache_bin_t')
+  for idx in xrange(0, SC_NBINS):
+    cache_idx = cache_bin_find(tcache['bins_small'][idx], ptr, True)
+    if len(cache_idx) > 0:
+      ret.append((True, idx, cache_idx))
+  for idx in xrange(0, SC_NSIZES - SC_NBINS):
+    cache_idx = cache_bin_find(tcache['bins_large'][idx], ptr, False)
+    if len(cache_idx) > 0:
+      ret.append((False, idx, cache_idx))
+  return ret
+
+# ptr, int 类型.
+# RET: [(tsd, [(is_small, idx, [cache_idx])])]
+def all_tcache_find(ptr):
+  ret = []
+  def tsd_find(tsd):
+    find_ret = tcache_find(tsd, ptr)
+    if len(find_ret) > 0:
+      ret.append((tsd, find_ret))
+    return True
+  traverse_tsd_list(tsd_find)
+  return ret
