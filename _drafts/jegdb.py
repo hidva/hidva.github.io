@@ -427,3 +427,41 @@ def all_tcache_find(ptr):
     return True
   traverse_tsd_list(tsd_find)
   return ret
+
+
+def tcache_check_on_cache_bin(cachebin, ret_dict, is_small, tsd, binidx):
+  ret = []
+  VOID_TYPE = gdb.lookup_type('void')
+  avail = int(cachebin['avail'])
+  ncached = int(cachebin['ncached'])
+  for idx in xrange(-ncached, 0):
+    val = int(array_at(avail, idx, VOID_TYPE.pointer()))
+    if not is_small:
+      val = PAGE_ADDR2BASE(val)
+    if val not in ret_dict:
+      ret_dict[val] = []
+    ret_dict[val].append((tsd, is_small, binidx, idx))
+  return
+
+def tcache_check_on_tcache(tsd, ret_dict):
+  tcache = tsd[TCACHE_FIELD]
+  for idx in xrange(0, SC_NBINS):
+    tcache_check_on_cache_bin(tcache['bins_small'][idx], ret_dict, True, tsd, idx)
+  for idx in xrange(0, SC_NSIZES - SC_NBINS):
+    tcache_check_on_cache_bin(tcache['bins_large'][idx], ret_dict, False, tsd, idx)
+  return
+
+# 返回在 tcache 中出现多次的地址. [ptr, [(tsd, is_small, binidx, cache_idx)]]
+# 对于 large class, ptr 为 page base ptr, cache_oblivious.
+# 返回 空 表明没有这样的地址.
+def tcache_check():
+  ret = {}
+  def on_tsd(tsd):
+    tcache_check_on_tcache(tsd, ret)
+  traverse_tsd_list(on_tsd)
+  new_ret = {}
+  for ptr in ret:
+    ptrinfo = ret[ptr]
+    if len(ptrinfo) > 1:
+      new_ret[ptr] = ptrinfo
+  return new_ret
