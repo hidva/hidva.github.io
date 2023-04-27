@@ -189,6 +189,24 @@ def extent_szind_get(extent):
 def extent_addr_get(extent):
   return int(extent['e_addr'])
 
+def extent_nfree_get(extent):
+  e_bits = int(extent['e_bits'])
+  return ((e_bits & EXTENT_BITS_NFREE_MASK) >> EXTENT_BITS_NFREE_SHIFT)
+
+def extent_slab_nreg(extent):
+  assert extent_slab_get(extent)
+  szind = extent_szind_get(extent)
+  regsize = int(sz_index2size_tab[szind])
+  exsize = extent_size_get(extent)
+  assert exsize % regsize == 0
+  return exsize / regsize
+
+def extent_slab_isfree(extent, regind):
+  assert extent_slab_get(extent)
+  assert regind >= 0
+  assert regind < extent_slab_nreg(extent)
+  return not bitmap_get(int(extent['e_slab_data']['bitmap'].address), regind)
+
 extent_state_active   = 0
 extent_state_dirty    = 1
 extent_state_muzzy    = 2
@@ -284,61 +302,12 @@ def ptr_info(ptr):
     regind, regsize = arena_slab_regind(ex, ptr)
     chunk_ptr = chunk_ptr + regind * regsize
     chunk_size = regsize
-    is_free = not bitmap_get(int(ex['e_slab_data']['bitmap'].address), regind)
+    is_free = extent_slab_isfree(ex, regind)
   else:
     chunk_size = extent_size_get(ex)
     is_free = extent_state_get(ex) != extent_state_active
   return (small_size_class, chunk_ptr, chunk_size, is_free)
 
-
-# 输入: maintenance info sections
-# 输出: 若干互不相交的地址区间
-class Merger(object):
-  def __init__(self):
-    # self.data [(left, right)], 每一个元素表明 [left, right) 区间, 元素之间不相交, 并且按照 left 从小到大排序.
-    self.data_l = []
-    self.data_r = []
-
-  # 若 [left, right) 表明的区间与 self.data 某一区间相交, 则合入该区间. 否则新插入到 self.data 中.
-  def insert(self, left, right):
-    idx = bisect.bisect_left(self.data_l, left)
-    merge_l = idx > 0 and left <= self.data_r[idx - 1]
-    merge_r = idx < len(self.data_l) and right >= self.data_l[idx]
-    if not merge_l and not merge_r:
-      self.data_l.insert(idx, left)
-      self.data_r.insert(idx, right)
-      return
-    if merge_l and not merge_r:
-      self.data_r[idx - 1] = max(right, self.data_r[idx - 1])
-      return
-    if not merge_l and merge_r:
-      self.data_l[idx] = left
-      self.data_r[idx] = max(right, self.data_r[idx])
-      return
-    # merge_l and merge_r
-    self.data_r[idx - 1] = max(right, self.data_r[idx])
-    self.data_l.pop(idx)
-    self.data_r.pop(idx)
-    return
-
-# fileobj, 该文件中存放着 maintenance info sections 的输出.
-# ret [(left, right)], 等同于 Merger::data.
-def parse_info_sections(fileobj):
-  PATTERN = re.compile(r'(0x[0-9a-f]+)->(0x[0-9a-f]+)\s+at\s+(0x[0-9a-f]+)')
-  merger = Merger()
-  for line in fileobj:
-    line = line.strip()
-    if not line:
-      continue
-    matchobj = PATTERN.search(line)
-    if not matchobj:
-      continue
-    s_addr = int(matchobj.group(1), 0)
-    e_addr = int(matchobj.group(2), 0)
-    if s_addr >= e_addr:
-      continue
-    merger.insert(s_addr, e_addr)
-  return [(merger.data_l[i], merger.data_r[i]) for i in xrange(0, len(merger.data_l))]
 
 TCACHE_FIELD = 'cant_access_tsd_items_directly_use_a_getter_or_setter_tcache'
 
@@ -465,3 +434,94 @@ def tcache_check():
     if len(ptrinfo) > 1:
       new_ret[ptr] = ptrinfo
   return new_ret
+
+
+def sz_size2index(user_size):
+  for i in xrange(0, SC_NSIZES):
+    if int(sz_index2size_tab[i]) >= user_size:
+      return i
+  raise RuntimeError('invalid user size', user_size)
+
+
+# cb 调用形式 Fn(int), 参数为元素的地址.
+def traverse_inuse_slab(user_size, cb):
+  szind = sz_size2index(user_size)
+  regsize = int(sz_index2size_tab[szind])
+  assert szind < SC_NBINS
+
+  def on_extent(e):
+    #print "on_extent", e
+    if extent_szind_get(e) != szind:
+      #print "on_extent ignore, ", extent_szind_get(e)
+      return True
+    if not extent_slab_get(e):
+      #print "on_extent", e
+      #raise RuntimeError("bad extent", e)
+      return True
+    nreg = extent_slab_nreg(e)
+    ex_nfree = extent_nfree_get(e)
+    e_addr = extent_addr_get(e)
+    assert nreg >= ex_nfree
+    if nreg <= ex_nfree:
+      #print "on_extent ignore2 nfree=", ex_nfree, "nreg=", nreg
+      return True
+    for idx in xrange(0, nreg):
+      if extent_slab_isfree(e, idx):
+        continue
+      chunk_ptr = idx * regsize + e_addr
+      cb(chunk_ptr)
+    return True
+
+  traverse_extent(on_extent)
+  return
+
+
+# 如下不属于 jemalloc gdb script 一部分, 没地方放这些脚本, 塞这里吧.
+# 输入: maintenance info sections
+# 输出: 若干互不相交的地址区间
+class Merger(object):
+  def __init__(self):
+    # self.data [(left, right)], 每一个元素表明 [left, right) 区间, 元素之间不相交, 并且按照 left 从小到大排序.
+    self.data_l = []
+    self.data_r = []
+
+  # 若 [left, right) 表明的区间与 self.data 某一区间相交, 则合入该区间. 否则新插入到 self.data 中.
+  def insert(self, left, right):
+    idx = bisect.bisect_left(self.data_l, left)
+    merge_l = idx > 0 and left <= self.data_r[idx - 1]
+    merge_r = idx < len(self.data_l) and right >= self.data_l[idx]
+    if not merge_l and not merge_r:
+      self.data_l.insert(idx, left)
+      self.data_r.insert(idx, right)
+      return
+    if merge_l and not merge_r:
+      self.data_r[idx - 1] = max(right, self.data_r[idx - 1])
+      return
+    if not merge_l and merge_r:
+      self.data_l[idx] = left
+      self.data_r[idx] = max(right, self.data_r[idx])
+      return
+    # merge_l and merge_r
+    self.data_r[idx - 1] = max(right, self.data_r[idx])
+    self.data_l.pop(idx)
+    self.data_r.pop(idx)
+    return
+
+# fileobj, 该文件中存放着 maintenance info sections 的输出.
+# ret [(left, right)], 等同于 Merger::data.
+def parse_info_sections(fileobj):
+  PATTERN = re.compile(r'(0x[0-9a-f]+)->(0x[0-9a-f]+)\s+at\s+(0x[0-9a-f]+)')
+  merger = Merger()
+  for line in fileobj:
+    line = line.strip()
+    if not line:
+      continue
+    matchobj = PATTERN.search(line)
+    if not matchobj:
+      continue
+    s_addr = int(matchobj.group(1), 0)
+    e_addr = int(matchobj.group(2), 0)
+    if s_addr >= e_addr:
+      continue
+    merger.insert(s_addr, e_addr)
+  return [(merger.data_l[i], merger.data_r[i]) for i in xrange(0, len(merger.data_l))]
