@@ -14,7 +14,7 @@ tags: ["C++"]
 
 首先介绍下 PostgreSQL 中的异常处理机制, PG 基于 setjmp/longjmp 实现了错误处理, 其大概姿势:
 
-```C++
+```c++
 // PG_TRY 会使用 setjmp() 注册一个 jmpbuf, 保存在全局变量 PG_exception_stack 中.
 PG_TRY();
 {
@@ -32,7 +32,7 @@ PG_END_TRY();
 
 这套机制在 C 语言背景下工作地很好, 但当和 C++ 结合在一起使用时, 就有了问题: elog(ERROR) 触发的 longjmp 不会执行 stack unwinding, 导致 C++ 局部变量的析构无法执行:
 
-```C++
+```c++
 const char* f() {
   auto str = std::string("do you wanna build a snowman");
   // 如果 relation_open 调用链中某处执行了 elog(ERROR),
@@ -47,7 +47,7 @@ PG 自身文档也特别说明了:
 
 目前在 Greenplum 中, 其优化器 ORCA 是通过 C++ 编写, GP 是通过一个 wrapper 层来隔离 C/C++ 边界, 所有可能会被 ORCA 访问的 PG C 接口都必须通过 wrapper 来调用, 如 gpdbwrappers.cpp 文件所示:
 
-```C++
+```c++
 void
 gpdb::FreeAttrStatsSlot(AttStatsSlot *sslot)
 {
@@ -72,7 +72,7 @@ gpdb::FreeAttrStatsSlot(AttStatsSlot *sslot)
 
 另外 pthread_exit 也是利用 _Unwind_ForcedUnwind 实现, 毕竟在 pthread 终止线程时, 其不确定其线程栈上是否有 C++ 栈, 是否有 C++ 局部变量析构需要执行. 与 PG 这里情况更相似的是 pthread_cleanup_push/pthread_cleanup_pop, pthread_cleanup_push 在 C++ 环境中是通过局部变量来实现, 在 C 环境是通过 setjmp/longjmp 实现的, 如:
 
-```C
+```c
 #ifdef __cplusplus
 #  define pthread_cleanup_push(routine, arg) \
   do {									      \
@@ -104,7 +104,7 @@ gpdb::FreeAttrStatsSlot(AttStatsSlot *sslot)
 
 众所周知, C++ 未关联到 catch 的异常会触发 std::terminate 调用终止当前进程; 在对 C++ ABI 中异常处理流程有所了解之后, 在 PG 这个背景下, 我们可以在遇到 C++ uncaught exception 之后, 不触发 terminate, 而是将控制流转向最近的 PG_TRY 处, 即在此之后 PG_TRY 行为上就等同于 C++ try 语句了. 这样便能避免 uncaught exception 导致进程终止. 这块实现逻辑很简单:
 
-```C++
+```c++
 // 如 ABI 规定: _Unwind_RaiseException 是 throw/std::rethrow_exception/rethrow 的入口
 _Unwind_Reason_Code _Unwind_RaiseException (struct _Unwind_Exception *e)
 {
