@@ -50,7 +50,7 @@ $$
 P(A_1 \cap A_2 \cap \cdots \cap A_n) >= P(A_1) + P(A_2) + \cdots + P(A_n) - (n - 1)
 $$
 
-条件概率, $P(A|B) = \frac{P(A \cap B)}{P (B)}$, 这个公式是人为定义的, 不是推断出来的. 条件概率也满足概率公理, 所以条件概率也是概率律.
+条件概率, <span>$P(A|B) = \frac{P(A \cap B)}{P (B)}$</span>, 这个公式是人为定义的, 不是推断出来的. 条件概率也满足概率公理, 所以条件概率也是概率律.
 
 $$
 P(A \cup B | Z) = P(A|Z) + P(B|Z) - P(A \cap B|Z)
