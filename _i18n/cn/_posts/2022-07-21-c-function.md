@@ -28,7 +28,7 @@ void is_valid_jsonb_with_schema() {
 
 ![as2cfg]({{site.url}}/assets/20220723.as2cfg.png)
 
-根据 [相关 ABI 标准]({{site.url}}2019/12/09/behindcall/) 可知 rax 寄存器存放着函数的返回值. 如上控制流高亮处, eax 值来自于 ebp, ebp 有 0x7f245b644a28
+根据 [相关 ABI 标准]({{site.url}}/2019/12/09/behindcall/) 可知 rax 寄存器存放着函数的返回值. 如上控制流高亮处, eax 值来自于 ebp, ebp 有 0x7f245b644a28
 xor ebp,ebp, 0x7f245b644b26 setne bpl 两处赋值; 其中 0x7f245b644a28 处 xor 会将 ebp 设置为 0; 0x7f245b644b26 处 setne 会根据之前 cmp 指令结果设置 bpl 寄存器, 即 ebp 的低八位,
 
 ![register]({{site.url}}/assets/20220723.reg.jpg)
