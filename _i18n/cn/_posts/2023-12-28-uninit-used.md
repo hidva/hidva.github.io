@@ -134,5 +134,5 @@ public:
 
 ## 后记
 
-很明显, 这又是和 [C++ 的心智负担 -- Integral promotion](https://ata.atatech.org/articles/11000234868), [C++: is_move_constructible?](https://ata.atatech.org/articles/11000258881) 等等一样, 又是一个不得不让人在写代码时时刻惦记着的心智负担: '啊, 我给类加了个成员, 可一定要记得加个初始化啊!'. 看来我们的 clang-tidy 又要有的忙了..
+很明显, 这又是和 [C++ 的心智负担 -- Integral promotion]({{site.url}}/2022/03/28/badcpp/), [C++: is_move_constructible?]({{site.url}}/2023/02/15/cpp-move/) 等等一样, 又是一个不得不让人在写代码时时刻惦记着的心智负担: '啊, 我给类加了个成员, 可一定要记得加个初始化啊!'. 看来我们的 clang-tidy 又要有的忙了..
 
