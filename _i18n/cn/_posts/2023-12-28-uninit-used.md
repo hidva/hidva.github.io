@@ -109,4 +109,30 @@ S* f1() {
 
 解释了为啥 `S() = default` 时会有 memset(0).
 
-但等等, 在我们代码中, Transaction 是有 `Transaction() {}` 的啊! 为啥还是会有 memset(0) 效果??? (C++ 啊! 真是没一点意思...
+但等等, 在我们代码中, Transaction 是有 `Transaction() {}` 的啊! 为啥还是会有 memset(0) 效果??? 这时因为 `make_lw_shared<Transaction>()` 并不是直接 `new Transaction()`, 而是 `new shared_ptr_no_esft<Transaction>()`, 而 shared_ptr_no_esft 定义:
+
+```c++
+template <typename T>
+struct shared_ptr_no_esft {
+  shared_ptr_counter_type _count = 0;
+  T _value;
+public:
+  shared_ptr_no_esft() = default;
+  template <typename... A>
+  shared_ptr_no_esft(A&&... a) : _value(std::forward<A>(a)...) {}
+}
+```
+
+因此在我改动之前, 在 new 分配内存时, 是调用 `new shared_ptr_no_esft<Transaction>()`, 编译器此时行为:
+1. 先调用 malloc() 分配内存.
+2. memset(0); 由于 shared_ptr_no_esft() = default 命中了 zero-initialized 规则.
+3. 执行 shared_ptr_no_esft 成员初始化 -> 初始化 Transaction 成员.
+
+在我给 Transction(private_tag) 构造加了个参数之后, 此时分配内存变为了: `new shared_ptr_no_esft<Transaction>(private_tag)`. 编译器行为:
+1. 先调用 malloc() 分配内存.
+2. 直接调用 shared_ptr_no_esft(private_tag) 构造函数, 不会 memset(0).
+
+## 后记
+
+很明显, 这又是和 [C++ 的心智负担 -- Integral promotion](https://ata.atatech.org/articles/11000234868), [C++: is_move_constructible?](https://ata.atatech.org/articles/11000258881) 等等一样, 又是一个不得不让人在写代码时时刻惦记着的心智负担: '啊, 我给类加了个成员, 可一定要记得加个初始化啊!'. 看来我们的 clang-tidy 又要有的忙了..
+
